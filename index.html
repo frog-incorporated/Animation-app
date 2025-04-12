@@ -383,3 +383,38 @@
         loadFrame(currentFrameIndex);
         updateFrameIndicator();
       } else {
+        // If only one frame exists, just clear it.
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        frames[0] = null;
+      }
+    });
+
+    // Animation Playback (toggling Play/Stop)
+    const playButton = document.getElementById('playAnimation');
+    playButton.addEventListener('click', () => {
+      if (animationInterval) {
+        clearInterval(animationInterval);
+        animationInterval = null;
+        playButton.textContent = 'Play Animation';
+        loadFrame(currentFrameIndex);
+      } else {
+        saveCurrentFrame();
+        let index = 0;
+        animationInterval = setInterval(() => {
+          if (index >= frames.length) index = 0;
+          if (frames[index]) {
+            ctx.putImageData(frames[index], 0, 0);
+          } else {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+          }
+          index++;
+        }, 200);
+        playButton.textContent = 'Stop Animation';
+      }
+    });
+
+    // Load the initial (blank) frame on startup
+    loadFrame(currentFrameIndex);
+  </script>
+</body>
+</html>
