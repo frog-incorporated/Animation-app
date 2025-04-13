@@ -24,8 +24,12 @@
       flex-wrap: wrap;
       gap: 8px;
       justify-content: center;
+      align-items: center;
     }
-    #toolbar button, #toolbar input[type="color"] {
+    #toolbar button,
+    #toolbar input[type="color"],
+    #toolbar input[type="number"],
+    #toolbar label {
       padding: 10px;
       font-size: 14px;
       border: none;
@@ -35,11 +39,18 @@
       color: #fff;
       transition: background 0.2s;
     }
-    #toolbar button:hover, #toolbar input[type="color"]:hover {
+    #toolbar button:hover,
+    #toolbar input[type="color"]:hover {
       background: #0056b3;
     }
     #toolbar button.active {
       background: #0056b3;
+    }
+    #toolbar input[type="number"] {
+      background: #fff;
+      color: #000;
+      border: 1px solid #ccc;
+      cursor: auto;
     }
     #main {
       display: flex;
@@ -78,69 +89,90 @@
   <div id="toolbar">
     <button id="penTool" class="active">Pen</button>
     <button id="bucketTool">Bucket</button>
+    <button id="selectTool">Select</button>
+    <button id="pasteTool">Paste</button>
+    <button id="copySelection">Copy</button>
     <input type="color" id="colorPicker" value="#000000">
     <button id="addFrame">Add Frame</button>
+    <button id="deleteFrame">Delete Frame</button>
+    <label for="frameRateInput">Frame Rate:</label>
+    <input type="number" id="frameRateInput" min="1" max="60" value="30" style="width:60px;">
     <button id="previewAnim">Preview Animation</button>
     <button id="downloadMP4">Download MP4</button>
+    <button id="importImageBtn">Import Image</button>
+    <input type="file" id="importImage" accept="image/*" style="display:none;">
   </div>
   <div id="main">
     <canvas id="canvas" width="800" height="500"></canvas>
     <div id="framesPanel"></div>
   </div>
   <script>
-    // Get elements and set up context
+    // Get element references
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const penToolBtn = document.getElementById('penTool');
     const bucketToolBtn = document.getElementById('bucketTool');
+    const selectToolBtn = document.getElementById('selectTool');
+    const pasteToolBtn = document.getElementById('pasteTool');
+    const copySelectionBtn = document.getElementById('copySelection');
     const colorPicker = document.getElementById('colorPicker');
     const addFrameBtn = document.getElementById('addFrame');
+    const deleteFrameBtn = document.getElementById('deleteFrame');
+    const frameRateInput = document.getElementById('frameRateInput');
     const previewAnimBtn = document.getElementById('previewAnim');
     const downloadMP4Btn = document.getElementById('downloadMP4');
+    const importImageBtn = document.getElementById('importImageBtn');
+    const importImageInput = document.getElementById('importImage');
     const framesPanel = document.getElementById('framesPanel');
 
     // App state
-    let currentTool = 'pen';
-    let drawing = false;
-    let lastX = 0, lastY = 0;
-    let frames = []; // Each frame is stored as a dataURL
+    let currentTool = 'pen'; // "pen", "bucket", "select", "paste"
+    let drawing = false, lastX = 0, lastY = 0;
+    let frames = []; // saved frames as data URLs
     let currentFrameIndex = -1;
     let previewInterval = null;
+    
+    // Selection state
+    let isSelecting = false;
+    let selectionStart = { x: 0, y: 0 };
+    let selectionRect = null; // {x, y, width, height}
+    let savedImageData = null; // canvas state before selection
+    let clipboardData = null; // copied selection (ImageData)
 
     // Set up canvas default settings
     ctx.lineWidth = 3;
     ctx.lineCap = 'round';
     ctx.strokeStyle = colorPicker.value;
 
-    // Update active tool appearance
+    // Update active tool button appearances
     function updateToolButtons() {
-      penToolBtn.classList.toggle('active', currentTool === 'pen');
-      bucketToolBtn.classList.toggle('active', currentTool === 'bucket');
+      // Remove active class from all tool buttons
+      [penToolBtn, bucketToolBtn, selectToolBtn, pasteToolBtn].forEach(btn => btn.classList.remove('active'));
+      if(currentTool === 'pen') penToolBtn.classList.add('active');
+      else if(currentTool === 'bucket') bucketToolBtn.classList.add('active');
+      else if(currentTool === 'select') selectToolBtn.classList.add('active');
+      else if(currentTool === 'paste') pasteToolBtn.classList.add('active');
     }
 
-    // Event listeners for tool buttons
-    penToolBtn.addEventListener('click', () => {
-      currentTool = 'pen';
-      updateToolButtons();
-    });
-    bucketToolBtn.addEventListener('click', () => {
-      currentTool = 'bucket';
-      updateToolButtons();
-    });
+    // Event listeners for tool selection
+    penToolBtn.addEventListener('click', () => { currentTool = 'pen'; updateToolButtons(); });
+    bucketToolBtn.addEventListener('click', () => { currentTool = 'bucket'; updateToolButtons(); });
+    selectToolBtn.addEventListener('click', () => { currentTool = 'select'; updateToolButtons(); });
+    pasteToolBtn.addEventListener('click', () => { currentTool = 'paste'; updateToolButtons(); });
+
     colorPicker.addEventListener('change', () => {
       ctx.strokeStyle = colorPicker.value;
     });
 
     // Pen drawing functions
     function startDrawing(e) {
-      if (currentTool !== 'pen') return;
       drawing = true;
       const pos = getPos(e);
       lastX = pos.x;
       lastY = pos.y;
     }
     function draw(e) {
-      if (!drawing || currentTool !== 'pen') return;
+      if (!drawing) return;
       const pos = getPos(e);
       ctx.beginPath();
       ctx.moveTo(lastX, lastY);
@@ -153,7 +185,7 @@
       drawing = false;
     }
 
-    // Get mouse / touch position relative to the canvas
+    // Helper: get position relative to canvas
     function getPos(e) {
       let rect = canvas.getBoundingClientRect();
       let x, y;
@@ -167,14 +199,13 @@
       return { x, y };
     }
 
-    // Flood fill algorithm for the bucket tool
+    // Flood fill algorithm for bucket tool (unchanged)
     function floodFill(startX, startY, fillColor) {
       const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imgData.data;
       const width = canvas.width;
       const height = canvas.height;
       
-      // Convert fill color hex to rgba
       const hex = fillColor.replace('#', '');
       const rFill = parseInt(hex.substring(0,2), 16);
       const gFill = parseInt(hex.substring(2,4), 16);
@@ -188,7 +219,6 @@
       const bTarget = data[offset+2];
       const aTarget = data[offset+3];
 
-      // If the target color and fill color are the same, nothing to do.
       if (rTarget === rFill && gTarget === gFill && bTarget === bFill && aTarget === aFill) {
         return;
       }
@@ -198,7 +228,6 @@
         const x = newPos[0];
         let y = newPos[1];
         let pixelPos = (y * width + x) * 4;
-        // move up as long as the color matches and we’re inside the canvas
         while(y >= 0 && matchColor(pixelPos, rTarget, gTarget, bTarget, aTarget, data)) {
           y--;
           pixelPos -= width * 4;
@@ -208,13 +237,11 @@
         let reachLeft = false;
         let reachRight = false;
         while (y < height && matchColor(pixelPos, rTarget, gTarget, bTarget, aTarget, data)) {
-          // fill the current pixel with the fill color
           data[pixelPos] = rFill;
           data[pixelPos+1] = gFill;
           data[pixelPos+2] = bFill;
           data[pixelPos+3] = aFill;
           
-          // check left pixel
           if (x > 0) {
             if(matchColor(pixelPos - 4, rTarget, gTarget, bTarget, aTarget, data)) {
               if(!reachLeft){
@@ -225,7 +252,6 @@
               reachLeft = false;
             }
           }
-          // check right pixel
           if (x < width - 1) {
             if(matchColor(pixelPos + 4, rTarget, gTarget, bTarget, aTarget, data)) {
               if(!reachRight){
@@ -242,8 +268,6 @@
       }
       ctx.putImageData(imgData, 0, 0);
     }
-
-    // Helper: check if pixel at index matches given target rgba
     function matchColor(pixelPos, r, g, b, a, data) {
       return (data[pixelPos] === r &&
               data[pixelPos+1] === g &&
@@ -251,20 +275,82 @@
               data[pixelPos+3] === a);
     }
 
-    // Canvas event listeners (handle both mouse and touch)
+    // --- Selection and Paste functionality ---
+    function startSelection(e) {
+      const pos = getPos(e);
+      selectionStart = { x: pos.x, y: pos.y };
+      isSelecting = true;
+      // Save current canvas state to restore during drawing selection
+      savedImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    }
+    function updateSelection(e) {
+      if (!isSelecting) return;
+      const pos = getPos(e);
+      let x = Math.min(selectionStart.x, pos.x);
+      let y = Math.min(selectionStart.y, pos.y);
+      let width = Math.abs(selectionStart.x - pos.x);
+      let height = Math.abs(selectionStart.y - pos.y);
+      selectionRect = { x, y, width, height };
+      // Restore saved image and draw selection rectangle
+      ctx.putImageData(savedImageData, 0, 0);
+      ctx.save();
+      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = "red";
+      ctx.strokeRect(x, y, width, height);
+      ctx.restore();
+    }
+    function endSelection(e) {
+      if (!isSelecting) return;
+      isSelecting = false;
+      // Remove the drawn selection rectangle by restoring the saved state.
+      ctx.putImageData(savedImageData, 0, 0);
+      // selectionRect remains stored for copy action (if width & height > 0)
+    }
+    function pasteAt(e) {
+      if (!clipboardData) {
+        alert("No copied selection to paste.");
+        return;
+      }
+      const pos = getPos(e);
+      ctx.putImageData(clipboardData, pos.x, pos.y);
+      // Exit paste mode (return to pen)
+      currentTool = "pen";
+      updateToolButtons();
+    }
+
+    // --- Canvas event listeners ---
     canvas.addEventListener('mousedown', (e) => {
       if (currentTool === 'pen') {
         startDrawing(e);
       } else if (currentTool === 'bucket') {
         const pos = getPos(e);
         floodFill(Math.floor(pos.x), Math.floor(pos.y), colorPicker.value);
+      } else if (currentTool === 'select') {
+        startSelection(e);
+      } else if (currentTool === 'paste') {
+        pasteAt(e);
       }
     });
-    canvas.addEventListener('mousemove', draw);
-    canvas.addEventListener('mouseup', stopDrawing);
-    canvas.addEventListener('mouseout', stopDrawing);
-
-    // Touch support
+    canvas.addEventListener('mousemove', (e) => {
+      if (currentTool === 'pen' && drawing) {
+        draw(e);
+      } else if (currentTool === 'select' && isSelecting) {
+        updateSelection(e);
+      }
+    });
+    canvas.addEventListener('mouseup', (e) => {
+      if (currentTool === 'pen') {
+        stopDrawing();
+      } else if (currentTool === 'select' && isSelecting) {
+        endSelection(e);
+      }
+    });
+    canvas.addEventListener('mouseout', (e) => {
+      if (currentTool === 'pen') {
+        stopDrawing();
+      }
+    });
+    // Touch support (basic)
     canvas.addEventListener('touchstart', (e) => {
       e.preventDefault();
       if (currentTool === 'pen') {
@@ -272,29 +358,58 @@
       } else if (currentTool === 'bucket') {
         const pos = getPos(e);
         floodFill(Math.floor(pos.x), Math.floor(pos.y), colorPicker.value);
+      } else if (currentTool === 'select') {
+        startSelection(e);
+      } else if (currentTool === 'paste') {
+        pasteAt(e);
       }
     });
     canvas.addEventListener('touchmove', (e) => {
       e.preventDefault();
-      draw(e);
+      if (currentTool === 'pen' && drawing) {
+        draw(e);
+      } else if (currentTool === 'select' && isSelecting) {
+        updateSelection(e);
+      }
     });
     canvas.addEventListener('touchend', (e) => {
       e.preventDefault();
-      stopDrawing();
+      if (currentTool === 'pen') {
+        stopDrawing();
+      } else if (currentTool === 'select' && isSelecting) {
+        endSelection(e);
+      }
     });
 
-    // Function to add the current canvas as a new frame
+    // --- Frame management ---
     addFrameBtn.addEventListener('click', () => {
-      // Save current frame data
+      // Save current canvas image as a frame
       const dataURL = canvas.toDataURL();
       frames.push(dataURL);
       currentFrameIndex = frames.length - 1;
       updateFramesPanel();
-      // Clear canvas for next frame
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     });
-
-    // Update the frames thumbnails display
+    deleteFrameBtn.addEventListener('click', () => {
+      if (currentFrameIndex >= 0) {
+        frames.splice(currentFrameIndex, 1);
+        if (frames.length === 0) {
+          currentFrameIndex = -1;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        } else {
+          currentFrameIndex = Math.max(0, currentFrameIndex - 1);
+          let tempImg = new Image();
+          tempImg.onload = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
+          };
+          tempImg.src = frames[currentFrameIndex];
+        }
+        updateFramesPanel();
+      } else {
+        alert("No frame to delete.");
+      }
+    });
     function updateFramesPanel() {
       framesPanel.innerHTML = '';
       frames.forEach((frame, idx) => {
@@ -304,13 +419,12 @@
           img.classList.add('active-frame');
         }
         img.addEventListener('click', () => {
-          // Load selected frame into canvas
           currentFrameIndex = idx;
           let tempImg = new Image();
           tempImg.onload = function() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-          }
+          };
           tempImg.src = frame;
           updateFramesPanel();
         });
@@ -318,57 +432,49 @@
       });
     }
 
-    // Preview animation: cycle through frames
+    // --- Animation preview and MP4 recording ---
     previewAnimBtn.addEventListener('click', () => {
       if (frames.length === 0) {
         alert("No frames to preview. Please add frames first.");
         return;
       }
       let i = 0;
-      // Stop any existing preview interval
       if (previewInterval) {
         clearInterval(previewInterval);
         previewInterval = null;
       }
       previewInterval = setInterval(() => {
         let tempImg = new Image();
-        tempImg.onload = function() {
+        tempImg.onload = () => {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-        }
+        };
         tempImg.src = frames[i];
         i = (i + 1) % frames.length;
-      }, 300); // change frame every 300 ms
-      // Stop preview after 5 seconds (optional)
+      }, 300);
       setTimeout(() => {
         clearInterval(previewInterval);
         previewInterval = null;
-        // Reload the current frame into canvas
         if(currentFrameIndex >= 0) {
           let tempImg = new Image();
-          tempImg.onload = function() {
+          tempImg.onload = () => {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-          }
+          };
           tempImg.src = frames[currentFrameIndex];
         }
       }, 5000);
     });
-
-    // Download MP4: This function plays back the frames on the canvas while recording using
-    // the MediaRecorder API. It then downloads the recorded video. Note that due to browser limitations,
-    // the resulting file might actually be in WebM format even though it is saved with an .mp4 extension.
     downloadMP4Btn.addEventListener('click', () => {
       if (frames.length === 0) {
         alert("No frames to record. Please add frames first.");
         return;
       }
-      const fps = 30; // frames per second for the recorded video
-      // Capture the canvas stream
+      // Use the user-specified frame rate (default to 30 if not valid)
+      const fps = parseInt(frameRateInput.value, 10) || 30;
       const stream = canvas.captureStream(fps);
       let options = { mimeType: 'video/mp4' };
       if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-        // Fallback to WebM if mp4 is not supported
         if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
           options.mimeType = 'video/webm;codecs=vp9';
         } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
@@ -383,55 +489,7 @@
       mediaRecorder.ondataavailable = e => {
         if (e.data.size > 0) recordedChunks.push(e.data);
       };
-      mediaRecorder.onstop = function() {
-        const blob = new Blob(recordedChunks, { type: options.mimeType });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        // Despite the potential format mismatch, we use .mp4 as per the instructions.
-        a.href = url;
-        a.download = "animation.mp4";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      };
 
-      // Start recording
-      mediaRecorder.start();
-
-      // Play the animation once while recording
-      let i = 0;
-      const frameDelay = 300; // delay per frame in ms (same as preview)
-      function playFrame() {
-        if (i >= frames.length) {
-          mediaRecorder.stop();
-          // After recording, restore the most recent frame on the canvas.
-          if (currentFrameIndex >= 0) {
-            const tempImg = new Image();
-            tempImg.onload = function() {
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
-              ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-            };
-            tempImg.src = frames[currentFrameIndex];
-          }
-          return;
-        }
-        const tempImg = new Image();
-        tempImg.onload = function() {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
-          setTimeout(() => {
-            i++;
-            playFrame();
-          }, frameDelay);
-        };
-        tempImg.src = frames[i];
-      }
-      playFrame();
-    });
-  </script>
-</body>
-</html>
 
 
 
