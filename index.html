@@ -63,7 +63,7 @@
       flex-direction: column;
       align-items: center;
     }
-    /* The visible canvas: it shows the composite (background + onion-skin + current drawing) */
+    /* The visible canvas: shows composite (background + onion-skin + current drawing) */
     #canvas {
       border: 2px solid #ccc;
       border-radius: 8px;
@@ -102,6 +102,7 @@
       <button id="selectTool">Select</button>
       <button id="copySelection">Copy</button>
       <button id="pasteTool">Paste</button>
+      <button id="undoBtn">Undo</button>
     </div>
     <!-- Image Import -->
     <div class="tool-group">
@@ -143,13 +144,14 @@
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
 
-    // Toolbar button references
+    // Toolbar buttons
     const penTool = document.getElementById('penTool');
     const eraserTool = document.getElementById('eraserTool');
     const bucketTool = document.getElementById('bucketTool');
     const selectTool = document.getElementById('selectTool');
     const copySelectionBtn = document.getElementById('copySelection');
     const pasteTool = document.getElementById('pasteTool');
+    const undoBtn = document.getElementById('undoBtn');
     const colorPicker = document.getElementById('colorPicker');
     const importImageBtn = document.getElementById('importImageBtn');
     const importImageInput = document.getElementById('importImage');
@@ -181,31 +183,34 @@
     let frames = [];             // Saved frame images (dataURLs)
     let currentFrameIndex = -1;
     let previewInterval = null;
-    let lastFrameData = null;    // Holds the saved image of the previous frame (for onion-skin)
+    let lastFrameData = null;    // Saved image of previous frame (onion-skin)
 
-    // For selection tool (for both copy and move)
+    // For selection & move (operating on offscreen drawing only)
     let isSelecting = false;
-    let selectionRect = null;    // { x, y, width, height }
-    let savedSelectionImage = null; // Offscreen ImageData for current selection
+    let selectionStart = null;     // Starting point for a new selection
+    let selectionRect = null;      // { x, y, width, height }
+    let savedSelectionImage = null; // Offscreen ImageData from current selection
     let isMovingSelection = false;
     let moveOffset = { x: 0, y: 0 };
-    let movePos = null;          // New top‑left position during move
+    let movePos = null;          // New top-left position during a move
 
-    // Background settings: either a color or an uploaded image (stored as a dataURL)
+    // Background settings: stored separately (not part of the drawing)
     let background = { color: "#ffffff", image: null };
 
-    /* ========= Offscreen Drawing Layer ========= */
-    // We use an offscreen canvas to store ONLY the user’s drawing for the current frame.
+    // Offscreen drawing layer: holds only the user's drawing for the current frame.
     const offscreenCanvas = document.createElement('canvas');
     offscreenCanvas.width = canvas.width;
     offscreenCanvas.height = canvas.height;
     const offscreenCtx = offscreenCanvas.getContext('2d');
 
+    // Undo stack for offscreen drawing (each item is an ImageData snapshot)
+    const undoStack = [];
+
     /* ========= Utility Functions ========= */
     function getPos(e) {
       const rect = canvas.getBoundingClientRect();
       let x, y;
-      if (e.touches) {
+      if (e.touches && e.touches.length > 0) {
         x = e.touches[0].clientX - rect.left;
         y = e.touches[0].clientY - rect.top;
       } else {
@@ -215,25 +220,40 @@
       return { x, y };
     }
 
-    // Redraw the main (visible) canvas: first the background, then the onion-skin (if any),
+    // Push current offscreen drawing state for Undo.
+    function pushUndoState() {
+      const imageData = offscreenCtx.getImageData(0, 0, canvas.width, canvas.height);
+      undoStack.push(imageData);
+      // Limit undo stack length if desired.
+    }
+
+    function undo() {
+      if (undoStack.length > 0) {
+        const prevState = undoStack.pop();
+        offscreenCtx.putImageData(prevState, 0, 0);
+        redrawMainCanvas();
+      }
+    }
+
+    // Redraw the visible canvas: draw background, then (optionally) onion-skin (shadow) if present,
     // then the current offscreen drawing.
     function redrawMainCanvas() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      // Draw background
+      // Draw background (always drawn from background settings)
       if (background.image) {
         let bgImg = new Image();
         bgImg.onload = () => {
           ctx.drawImage(bgImg, 0, 0, canvas.width, canvas.height);
-          drawOnTop();
+          drawOverlay();
         };
         bgImg.src = background.image;
       } else {
         ctx.fillStyle = background.color;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        drawOnTop();
+        drawOverlay();
       }
-      // Function to draw onion-skin (if exists) and the drawing layer
-      function drawOnTop() {
+      // Draw overlay: onion-skin (if present) then current drawing.
+      function drawOverlay() {
         if (lastFrameData) {
           ctx.globalAlpha = 0.3;
           let shadowImg = new Image();
@@ -266,11 +286,11 @@
     bucketTool.addEventListener('click', () => { currentTool = 'bucket'; updateToolButtons(); });
     selectTool.addEventListener('click', () => { currentTool = 'select'; updateToolButtons(); });
     pasteTool.addEventListener('click', () => { currentTool = 'paste'; updateToolButtons(); });
+    undoBtn.addEventListener('click', undo);
 
     colorPicker.addEventListener('change', () => {
-      // This sets the pen color when in pen mode.
-      // (The eraser uses a different composite mode.)
-      // No further action needed.
+      // For pen tool, strokeStyle is taken from the color picker.
+      // (Eraser uses compositing mode instead.)
     });
 
     /* ========= Drawing Functions ========= */
@@ -356,14 +376,13 @@
           data[pixelPos+1] = gFill;
           data[pixelPos+2] = bFill;
           data[pixelPos+3] = aFill;
-          
           if(x > 0) {
             if(matchColor(pixelPos - 4)) {
               if(!reachLeft){
                 pixelStack.push([x - 1, y]);
                 reachLeft = true;
               }
-            } else if(reachLeft) {
+            } else {
               reachLeft = false;
             }
           }
@@ -373,7 +392,7 @@
                 pixelStack.push([x + 1, y]);
                 reachRight = true;
               }
-            } else if(reachRight) {
+            } else {
               reachRight = false;
             }
           }
@@ -385,113 +404,72 @@
     }
 
     /* ========= Selection & Move Functionality ========= */
-    // Variables for selection
-    let isSelectionActive = false;  // becomes true after selection is made
-    // When starting a selection, we work on offscreenCtx (the drawing layer).
-    let savedImageData = null; // stores offscreen drawing before selection begins
+    // For new selections, store the starting point separately.
+    let selectionStartPos = null;  // { x, y }
 
-    // Mouse down for selection: If a selection already exists and the click is inside it, initiate move.
-    canvas.addEventListener('mousedown', (e) => {
-      const pos = getPos(e);
-      if (currentTool === 'select') {
-        if (isSelectionActive && selectionRect &&
-            pos.x >= selectionRect.x && pos.x <= selectionRect.x + selectionRect.width &&
-            pos.y >= selectionRect.y && pos.y <= selectionRect.y + selectionRect.height) {
-          // Start moving the existing selection.
-          isMovingSelection = true;
-          moveOffset.x = pos.x - selectionRect.x;
-          moveOffset.y = pos.y - selectionRect.y;
-          movePos = { x: selectionRect.x, y: selectionRect.y };
-        } else {
-          // Start a new selection.
-          isSelecting = true;
-          selectionRect = { x: pos.x, y: pos.y, width: 0, height: 0 };
-          savedImageData = offscreenCtx.getImageData(0, 0, canvas.width, canvas.height);
-          isSelectionActive = false;
-        }
-      } else if (currentTool === 'pen' || currentTool === 'eraser') {
-        startDrawing(e);
-      } else if (currentTool === 'bucket') {
-        floodFillOffscreen(Math.floor(pos.x), Math.floor(pos.y), colorPicker.value);
-        redrawMainCanvas();
-      } else if (currentTool === 'paste') {
-        pasteAt(e);
+    // These functions are used in the canvas event handlers.
+    function handleSelectionStart(pos) {
+      if (isSelectionActive && selectionRect &&
+          pos.x >= selectionRect.x && pos.x <= selectionRect.x + selectionRect.width &&
+          pos.y >= selectionRect.y && pos.y <= selectionRect.y + selectionRect.height) {
+        // Start moving selection.
+        isMovingSelection = true;
+        moveOffset.x = pos.x - selectionRect.x;
+        moveOffset.y = pos.y - selectionRect.y;
+        movePos = { x: selectionRect.x, y: selectionRect.y };
+      } else {
+        // Start a new selection.
+        isSelecting = true;
+        selectionStartPos = pos;
+        selectionRect = { x: pos.x, y: pos.y, width: 0, height: 0 };
+        savedImageData = offscreenCtx.getImageData(0, 0, canvas.width, canvas.height);
+        isSelectionActive = false;
       }
-    });
+    }
 
-    canvas.addEventListener('mousemove', (e) => {
-      if ((currentTool === 'pen' || currentTool === 'eraser') && drawing) {
-        draw(e);
-      } else if (currentTool === 'select') {
-        if (isSelecting) {
-          const pos = getPos(e);
-          // Update selection rectangle
-          selectionRect.width = Math.abs(pos.x - selectionRect.x);
-          selectionRect.height = Math.abs(pos.y - selectionRect.y);
-          selectionRect.x = Math.min(savedImageData ? selectionRect.x : pos.x, pos.x);
-          selectionRect.y = Math.min(savedImageData ? selectionRect.y : pos.y, pos.y);
-          redrawMainCanvas();
-          // Overlay the selection border
-          ctx.save();
-          ctx.setLineDash([5, 3]);
-          ctx.strokeStyle = 'red';
-          ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
-          ctx.restore();
-        } else if (isMovingSelection) {
-          const pos = getPos(e);
-          movePos = { x: pos.x - moveOffset.x, y: pos.y - moveOffset.y };
-          redrawMainCanvas();
-          // Draw the moving selection at its new position on the main canvas
-          ctx.putImageData(savedSelectionImage, movePos.x, movePos.y);
-          ctx.save();
-          ctx.setLineDash([5,3]);
-          ctx.strokeStyle = 'red';
-          ctx.strokeRect(movePos.x, movePos.y, selectionRect.width, selectionRect.height);
-          ctx.restore();
-        }
-      }
-    });
+    function updateSelectionRect(pos) {
+      selectionRect.x = Math.min(selectionStartPos.x, pos.x);
+      selectionRect.y = Math.min(selectionStartPos.y, pos.y);
+      selectionRect.width = Math.abs(pos.x - selectionStartPos.x);
+      selectionRect.height = Math.abs(pos.y - selectionStartPos.y);
+      redrawMainCanvas();
+      ctx.save();
+      ctx.setLineDash([5, 3]);
+      ctx.strokeStyle = 'red';
+      ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
+      ctx.restore();
+    }
 
-    canvas.addEventListener('mouseup', (e) => {
-      if (currentTool === 'pen' || currentTool === 'eraser') {
-        stopDrawing();
-      } else if (currentTool === 'select') {
-        if (isSelecting) {
-          isSelecting = false;
-          // Finalize selection: capture the image from the offscreen drawing layer
-          if (selectionRect && selectionRect.width > 0 && selectionRect.height > 0) {
-            savedSelectionImage = offscreenCtx.getImageData(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
-            isSelectionActive = true;
-          }
-          redrawMainCanvas();
-          if (selectionRect) {
-            ctx.save();
-            ctx.setLineDash([5, 3]);
-            ctx.strokeStyle = 'red';
-            ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
-            ctx.restore();
-          }
-        } else if (isMovingSelection) {
-          // Commit the move: erase the original area from offscreen drawing and draw the moved image.
-          offscreenCtx.clearRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
-          offscreenCtx.putImageData(savedSelectionImage, movePos.x, movePos.y);
-          // Update selectionRect to new location.
-          selectionRect.x = movePos.x;
-          selectionRect.y = movePos.y;
-          isMovingSelection = false;
-          isSelectionActive = false; // After a move, you can start a new selection.
-          redrawMainCanvas();
-        }
+    function finalizeSelection() {
+      if (selectionRect && selectionRect.width > 0 && selectionRect.height > 0) {
+        savedSelectionImage = offscreenCtx.getImageData(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
+        isSelectionActive = true;
       }
-    });
-    canvas.addEventListener('mouseout', (e) => {
-      if ((currentTool === 'pen' || currentTool === 'eraser') && drawing) stopDrawing();
-    });
+      redrawMainCanvas();
+      if (selectionRect) {
+        ctx.save();
+        ctx.setLineDash([5, 3]);
+        ctx.strokeStyle = 'red';
+        ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
+        ctx.restore();
+      }
+    }
+
+    function commitMove() {
+      pushUndoState();
+      offscreenCtx.clearRect(selectionRect.x, selectionRect.y, selectionRect.width, selectionRect.height);
+      offscreenCtx.putImageData(savedSelectionImage, movePos.x, movePos.y);
+      // Update selection rectangle position.
+      selectionRect.x = movePos.x;
+      selectionRect.y = movePos.y;
+      isMovingSelection = false;
+      isSelectionActive = false;
+      redrawMainCanvas();
+    }
 
     /* ========= Copy & Paste ========= */
     copySelectionBtn.addEventListener('click', () => {
       if (selectionRect && selectionRect.width > 0 && selectionRect.height > 0 && savedSelectionImage) {
-        // Copy the saved selection image into a clipboard variable.
         clipboardData = savedSelectionImage;
         alert("Selection copied!");
       } else {
@@ -503,12 +481,78 @@
         alert("No copied selection to paste.");
         return;
       }
+      pushUndoState();
       const pos = getPos(e);
       offscreenCtx.putImageData(clipboardData, pos.x, pos.y);
       redrawMainCanvas();
       currentTool = 'pen';
       updateToolButtons();
     }
+
+    /* ========= Canvas Event Handlers (Unified for Mouse & Touch) ========= */
+    function handleCanvasStart(e) {
+      e.preventDefault();
+      const pos = getPos(e);
+      if (currentTool === 'select') {
+        handleSelectionStart(pos);
+      } else if (currentTool === 'pen' || currentTool === 'eraser') {
+        pushUndoState();
+        startDrawing(e);
+      } else if (currentTool === 'bucket') {
+        pushUndoState();
+        floodFillOffscreen(Math.floor(pos.x), Math.floor(pos.y), colorPicker.value);
+        redrawMainCanvas();
+      } else if (currentTool === 'paste') {
+        pasteAt(e);
+      }
+    }
+    function handleCanvasMove(e) {
+      e.preventDefault();
+      if ((currentTool === 'pen' || currentTool === 'eraser') && drawing) {
+        draw(e);
+      } else if (currentTool === 'select') {
+        if (isSelecting) {
+          const pos = getPos(e);
+          updateSelectionRect(pos);
+        } else if (isMovingSelection) {
+          const pos = getPos(e);
+          movePos = { x: pos.x - moveOffset.x, y: pos.y - moveOffset.y };
+          redrawMainCanvas();
+          ctx.putImageData(savedSelectionImage, movePos.x, movePos.y);
+          ctx.save();
+          ctx.setLineDash([5, 3]);
+          ctx.strokeStyle = 'red';
+          ctx.strokeRect(movePos.x, movePos.y, selectionRect.width, selectionRect.height);
+          ctx.restore();
+        }
+      }
+    }
+    function handleCanvasEnd(e) {
+      e.preventDefault();
+      if (currentTool === 'pen' || currentTool === 'eraser') {
+        stopDrawing();
+      } else if (currentTool === 'select') {
+        if (isSelecting) {
+          isSelecting = false;
+          finalizeSelection();
+        } else if (isMovingSelection) {
+          commitMove();
+        }
+      }
+    }
+
+    /* ========= Attach Mouse Event Listeners ========= */
+    canvas.addEventListener('mousedown', handleCanvasStart);
+    canvas.addEventListener('mousemove', handleCanvasMove);
+    canvas.addEventListener('mouseup', handleCanvasEnd);
+    canvas.addEventListener('mouseout', (e) => {
+      if ((currentTool === 'pen' || currentTool === 'eraser') && drawing) stopDrawing();
+    });
+
+    /* ========= Attach Touch Event Listeners for Mobile Support ========= */
+    canvas.addEventListener('touchstart', handleCanvasStart);
+    canvas.addEventListener('touchmove', handleCanvasMove);
+    canvas.addEventListener('touchend', handleCanvasEnd);
 
     /* ========= Import Image for Drawing ========= */
     importImageBtn.addEventListener('click', () => {
@@ -521,6 +565,7 @@
       reader.onload = (event) => {
         const img = new Image();
         img.onload = () => {
+          pushUndoState();
           offscreenCtx.drawImage(img, 0, 0, canvas.width, canvas.height);
           redrawMainCanvas();
         };
@@ -530,8 +575,8 @@
     });
 
     /* ========= Frame Management ========= */
-    // When adding a frame, we composite the background and the user drawing (without onion-skin)
     addFrameBtn.addEventListener('click', () => {
+      // Composite a frame using the background and offscreen drawing.
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = canvas.width;
       tempCanvas.height = canvas.height;
@@ -544,9 +589,10 @@
           const dataURL = tempCanvas.toDataURL();
           frames.push(dataURL);
           currentFrameIndex = frames.length - 1;
-          lastFrameData = dataURL; // Store for onion-skin in the next frame
+          lastFrameData = dataURL; // store for onion-skin in next frame
           updateFramesPanel();
           offscreenCtx.clearRect(0, 0, canvas.width, canvas.height);
+          undoStack.length = 0; // clear undo history for new frame
           redrawMainCanvas();
         };
         bgImg.src = background.image;
@@ -560,6 +606,7 @@
         lastFrameData = dataURL;
         updateFramesPanel();
         offscreenCtx.clearRect(0, 0, canvas.width, canvas.height);
+        undoStack.length = 0;
         redrawMainCanvas();
       }
     });
@@ -604,6 +651,7 @@
         offscreenCtx.drawImage(tempImg, 0, 0, canvas.width, canvas.height);
         redrawMainCanvas();
         lastFrameData = frames[currentFrameIndex];
+        undoStack.length = 0; // clear undo history on load
       };
       tempImg.src = frames[index];
     }
@@ -619,7 +667,6 @@
       previewInterval = setInterval(() => {
         const tempImg = new Image();
         tempImg.onload = () => {
-          // During preview, show only the saved frame without the onion-skin.
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           if (background.image) {
             let bgImg = new Image();
@@ -644,7 +691,7 @@
       }, 5000);
     });
 
-    /* ========= Download MP4 (Export Video Without Shadows) ========= */
+    /* ========= Download MP4 (Export Video Without Onion-Skin Shadows) ========= */
     downloadMP4Btn.addEventListener('click', () => {
       if (frames.length === 0) {
         alert("No frames to record.");
@@ -769,12 +816,12 @@
     });
 
     /* ========= Initial Draw ========= */
-    // Start with background only.
     offscreenCtx.clearRect(0, 0, canvas.width, canvas.height);
     redrawMainCanvas();
   </script>
 </body>
 </html>
+
 
 
 
