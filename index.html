@@ -187,7 +187,8 @@
 
     // For selection & move (operating on offscreen drawing only)
     let isSelecting = false;
-    let selectionStart = null;     // Starting point for a new selection
+    let isSelectionActive = false; // <<-- Newly declared state for selection finalization
+    let selectionStartPos = null;  // { x, y }
     let selectionRect = null;      // { x, y, width, height }
     let savedSelectionImage = null; // Offscreen ImageData from current selection
     let isMovingSelection = false;
@@ -224,7 +225,6 @@
     function pushUndoState() {
       const imageData = offscreenCtx.getImageData(0, 0, canvas.width, canvas.height);
       undoStack.push(imageData);
-      // Limit undo stack length if desired.
     }
 
     function undo() {
@@ -290,7 +290,6 @@
 
     colorPicker.addEventListener('change', () => {
       // For pen tool, strokeStyle is taken from the color picker.
-      // (Eraser uses compositing mode instead.)
     });
 
     /* ========= Drawing Functions ========= */
@@ -404,15 +403,12 @@
     }
 
     /* ========= Selection & Move Functionality ========= */
-    // For new selections, store the starting point separately.
-    let selectionStartPos = null;  // { x, y }
-
-    // These functions are used in the canvas event handlers.
+    // Handle selection start: if click is inside an active selection, then prepare for move.
     function handleSelectionStart(pos) {
       if (isSelectionActive && selectionRect &&
           pos.x >= selectionRect.x && pos.x <= selectionRect.x + selectionRect.width &&
           pos.y >= selectionRect.y && pos.y <= selectionRect.y + selectionRect.height) {
-        // Start moving selection.
+        // Start moving the existing selection.
         isMovingSelection = true;
         moveOffset.x = pos.x - selectionRect.x;
         moveOffset.y = pos.y - selectionRect.y;
@@ -821,6 +817,7 @@
   </script>
 </body>
 </html>
+
 
 
 
